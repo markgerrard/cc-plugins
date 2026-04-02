@@ -8,17 +8,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const API_BASE = "https://api.minimax.io/v1";
-const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes
-const DEFAULT_MODEL = "MiniMax-M1";
+const DEFAULT_TIMEOUT_MS = 300_000; // 2 minutes
+const DEFAULT_MODEL = "MiniMax-M2.7-highspeed";
 
 const MODEL_ALIASES = new Map([
-  ["fast", "MiniMax-Text-01"],
-  ["text", "MiniMax-Text-01"],
-  ["reasoning", "MiniMax-M1"],
-  ["m1", "MiniMax-M1"],
-  ["m2", "MiniMax-M2"],
-  ["pro", "MiniMax-M2"],
-  ["flagship", "MiniMax-M2"],
+  ["fast", "MiniMax-M2-highspeed"],
+  ["m2", "MiniMax-M2-highspeed"],
+  ["m2.5", "MiniMax-M2.5-highspeed"],
+  ["m2.7", "MiniMax-M2.7-highspeed"],
+  ["pro", "MiniMax-M2.7-highspeed"],
 ]);
 
 /**
@@ -55,11 +53,11 @@ export async function getMiniMaxAvailability() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: DEFAULT_MODEL,
-        messages: [{ role: "user", content: "ping" }],
+        model: "MiniMax-M2",
+        messages: [{ role: "user", content: "hi" }],
         max_tokens: 1,
       }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (testResponse.ok || testResponse.status === 200) {
@@ -141,8 +139,9 @@ export async function runMiniMaxPrompt(prompt, options = {}) {
       };
     }
 
-    // Extract text from response
-    const text = data?.choices?.[0]?.message?.content ?? "(No text response)";
+    // Extract text from response, strip reasoning <think> tags
+    let text = data?.choices?.[0]?.message?.content ?? "(No text response)";
+    text = text.replace(/<think>[\s\S]*?<\/think>\s*/g, "").trim();
 
     return {
       text,
