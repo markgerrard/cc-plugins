@@ -1,0 +1,8 @@
+{
+  "name": "grok",
+  "version": "1.0.0",
+  "description": "Use Grok from Claude Code for X/social sentiment scanning, narrative analysis, and real-time pulse checks.",
+  "author": {
+    "name": "Mark"
+  }
+}
