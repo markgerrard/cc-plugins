@@ -1,0 +1,8 @@
+{
+  "name": "minimax",
+  "version": "1.0.0",
+  "description": "Use MiniMax AI from Claude Code for reasoning, long-context analysis, code review, and structured task delegation.",
+  "author": {
+    "name": "Mark"
+  }
+}
