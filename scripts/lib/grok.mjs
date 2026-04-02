@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const API_BASE = "https://api.x.ai/v1";
-const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes
+const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 const DEFAULT_MODEL = "grok-4-1-fast-non-reasoning";
 
 const MODEL_ALIASES = new Map([

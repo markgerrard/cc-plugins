@@ -246,7 +246,9 @@ async function buildAskPrompt(flags, positional) {
 async function runCommand(kind, flags, positional, promptBuilder) {
   const { prompt, systemPrompt, tools, title } = await promptBuilder(flags, positional);
 
-  const isBackground = flags.background === true;
+  // sentiment, compare, and ask auto-background unless --wait is explicitly passed
+  const autoBackground = (kind === "sentiment" || kind === "compare") && flags.wait !== true;
+  const isBackground = flags.background === true || autoBackground;
 
   if (isBackground) {
     const jobId = generateJobId(kind.slice(0, 3));
