@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# install.sh — Install Codex and Gemini plugins into Claude Code
+# install.sh — Install LLM plugins into Claude Code
 #
 # Usage:
-#   ./install.sh          Install both plugins
+#   ./install.sh          Install all plugins
 #   ./install.sh codex    Install Codex only
 #   ./install.sh gemini   Install Gemini only
+#   ./install.sh grok     Install Grok only
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGINS_DIR="${HOME}/.claude/plugins"
@@ -16,14 +17,17 @@ INSTALLED_FILE="${PLUGINS_DIR}/installed_plugins.json"
 # Plugin source paths (inside this repo)
 CODEX_SRC="${SCRIPT_DIR}/codex/plugins/codex"
 GEMINI_SRC="${SCRIPT_DIR}/gemini"
+GROK_SRC="${SCRIPT_DIR}/grok"
 
 # Plugin install paths
 CODEX_DEST="${CACHE_DIR}/openai-codex/codex/local"
 GEMINI_DEST="${CACHE_DIR}/google-gemini/gemini/local"
+GROK_DEST="${CACHE_DIR}/xai-grok/grok/local"
 
 # Plugin registry keys
 CODEX_KEY="codex@openai-codex"
 GEMINI_KEY="gemini@google-gemini"
+GROK_KEY="grok@xai-grok"
 
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -117,16 +121,21 @@ case "$TARGET" in
   gemini)
     install_plugin "Gemini" "$GEMINI_SRC" "$GEMINI_DEST" "$GEMINI_KEY" "local"
     ;;
+  grok)
+    install_plugin "Grok" "$GROK_SRC" "$GROK_DEST" "$GROK_KEY" "local"
+    ;;
   all)
     install_plugin "Codex" "$CODEX_SRC" "$CODEX_DEST" "$CODEX_KEY" "local"
     install_plugin "Gemini" "$GEMINI_SRC" "$GEMINI_DEST" "$GEMINI_KEY" "local"
+    install_plugin "Grok" "$GROK_SRC" "$GROK_DEST" "$GROK_KEY" "local"
     ;;
   uninstall)
     uninstall_plugin "Codex" "$CODEX_DEST" "$CODEX_KEY"
     uninstall_plugin "Gemini" "$GEMINI_DEST" "$GEMINI_KEY"
+    uninstall_plugin "Grok" "$GROK_DEST" "$GROK_KEY"
     ;;
   *)
-    echo "Usage: $0 [codex|gemini|all|uninstall]"
+    echo "Usage: $0 [codex|gemini|grok|all|uninstall]"
     exit 1
     ;;
 esac
