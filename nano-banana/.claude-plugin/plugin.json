@@ -1,0 +1,8 @@
+{
+  "name": "nano-banana",
+  "version": "1.0.0",
+  "description": "Generate and edit images from Claude Code using Google Gemini's native image generation.",
+  "author": {
+    "name": "Mark"
+  }
+}
