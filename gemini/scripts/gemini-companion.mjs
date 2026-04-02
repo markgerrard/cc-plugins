@@ -3,571 +3,387 @@
 /**
  * gemini-companion.mjs — Main entry point for the Gemini plugin.
  *
+ * Thin Node adapter that routes everything through the Python ACP runtime.
+ *
  * Subcommands:
- *   setup          Check Gemini CLI availability and login status
- *   ask            Ask Gemini a question (with optional piped context)
- *   review         Run a code review via Gemini
- *   ui-review      Run a UI/UX-focused review via Gemini
- *   task           Delegate a general task to Gemini
- *   status         Show active and recent Gemini jobs
- *   result         Show the stored final output for a finished job
- *   cancel         Cancel an active background job
- *   task-worker    Internal: run a background job (not user-facing)
+ *   setup              Check Gemini availability and configuration
+ *   ask                Ask Gemini a question (with optional piped context)
+ *   review             Run a code review via Gemini
+ *   adversarial-review Run an adversarial/hostile code review
+ *   ui-review          Run a UI/UX-focused review via Gemini
+ *   ui-design          Creative UI design suggestions
+ *   task               Delegate a general task to Gemini
+ *   status             Show active and recent Gemini jobs
+ *   result             Show the stored final output for a finished job
+ *   cancel             Cancel an active background job
+ *   logs               Show logs for a job
  */
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import { parseArgs } from "./node/args.mjs";
+import { callGeminiAcp, streamGeminiAcp } from "./node/gemini-acp-bridge.mjs";
 import {
-  getGeminiAvailability,
-  runGeminiPrompt,
-  loadPromptTemplate,
-  interpolateTemplate,
-} from "./lib/gemini.mjs";
-import { getGitDiff, getGitLog, readFileContext, readStdinIfPiped } from "./lib/context.mjs";
-import {
-  generateJobId,
-  upsertJob,
-  writeJobFile,
-  readJobFile,
-  resolveJobFile,
-  resolveJobLogFile,
-  ensureStateDir,
-} from "./lib/state.mjs";
-import {
-  appendLogLine,
-  createJobLogFile,
-  createJobRecord,
-  runTrackedJob,
-  SESSION_ID_ENV,
-  nowIso,
-} from "./lib/tracked-jobs.mjs";
-import {
-  buildStatusSnapshot,
-  buildSingleJobSnapshot,
-  enrichJob,
-  resolveResultJob,
-  resolveCancelableJob,
-  readStoredJob,
-  sortJobsNewestFirst,
-} from "./lib/job-control.mjs";
-import {
-  renderStatusReport,
-  renderJobStatusReport,
-  renderStoredJobResult,
-  renderCancelReport,
-} from "./lib/render.mjs";
-import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
-import { terminateProcessTree } from "./lib/process.mjs";
+  renderResult, renderError, renderBackgroundLaunch,
+  renderStatusList, renderSingleJobStatus, renderSetup,
+} from "./node/render.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const SCRIPT_PATH = fileURLToPath(import.meta.url);
+
+// ─── Helpers (stay in Node) ────────────────────────────────────────
+
+function readStdinIfPiped() {
+  try {
+    if (!process.stdin.isTTY) {
+      return fs.readFileSync(0, "utf8");
+    }
+  } catch {
+    // fd 0 not readable
+  }
+  return null;
+}
+
+function getGitDiff(base = "HEAD", scope = "auto") {
+  const args = ["diff"];
+  if (scope === "branch") {
+    args.push(`${base}...HEAD`);
+  } else if (scope === "working-tree") {
+    // unstaged changes only
+  } else {
+    // auto: staged + unstaged vs base
+    args.push(base);
+  }
+
+  const result = spawnSync("git", args, {
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 30_000,
+  });
+
+  if (result.status !== 0 || !result.stdout?.trim()) {
+    return null;
+  }
+  return result.stdout;
+}
+
+function readFileContext(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function loadPromptTemplate(name) {
+  const templatePath = path.join(ROOT_DIR, "prompts", `${name}.md`);
+  return fs.readFileSync(templatePath, "utf8");
+}
+
+function interpolate(template, vars) {
+  let result = template;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replaceAll(`{{${key}}}`, value);
+  }
+  return result;
+}
+
+// ─── Prompt builders ───────────────────────────────────────────────
+
+function buildAskPrompt(flags, positional) {
+  const question = positional.join(" ");
+  if (!question) {
+    console.error("No question provided.\nUsage: /gemini:ask <question>");
+    process.exit(1);
+  }
+  const stdin = readStdinIfPiped();
+  if (stdin) {
+    return `${question}\n\n---\n\n${stdin}`;
+  }
+  return question;
+}
+
+function buildReviewPrompt(flags, positional) {
+  const focus = positional.join(" ") || "general code review";
+  const base = flags.base || "HEAD";
+  const scope = flags.scope || "auto";
+
+  const diff = getGitDiff(base, scope);
+  if (!diff) return null;
+
+  let prompt;
+  try {
+    const template = loadPromptTemplate("code-review");
+    prompt = interpolate(template, { focus });
+  } catch {
+    prompt = `You are an expert code reviewer. Review the following git diff.\n\nFocus: ${focus}\n\nProvide:\n1. **Critical issues** — bugs, security problems, data loss risks\n2. **Important suggestions** — performance, maintainability, best practices\n3. **Minor notes** — style, naming, documentation\n\nBe specific: reference file names and line numbers from the diff.`;
+  }
+  return `${prompt}\n\n---\n\n${diff}`;
+}
+
+function buildAdversarialReviewPrompt(flags, positional) {
+  const focus = positional.join(" ") || "find all bugs and security issues";
+  const base = flags.base || "HEAD";
+  const scope = flags.scope || "auto";
+
+  const diff = getGitDiff(base, scope);
+  if (!diff) return null;
+
+  let prompt;
+  try {
+    const template = loadPromptTemplate("adversarial-review");
+    prompt = interpolate(template, { focus });
+  } catch {
+    prompt = `You are a hostile, adversarial code reviewer. Assume bugs exist. Review the following diff for security holes, race conditions, edge cases, data integrity issues, and failure modes. Be specific — file:line references, exploit scenarios, concrete fixes. Do NOT pad with praise.\n\nFocus: ${focus}`;
+  }
+  return `${prompt}\n\n---\n\n${diff}`;
+}
+
+function buildUiReviewPrompt(flags, positional) {
+  const focus = positional.join(" ") || "general UI/UX review";
+  let context = "";
+
+  if (flags.file) {
+    const content = readFileContext(flags.file);
+    if (content) {
+      context = `File: ${flags.file}\n${content}`;
+    }
+  }
+
+  const stdin = readStdinIfPiped();
+  if (stdin) {
+    context += (context ? "\n\n" : "") + stdin;
+  }
+
+  if (!context) {
+    const diff = getGitDiff();
+    if (diff) context = diff;
+  }
+
+  let prompt;
+  try {
+    const template = loadPromptTemplate("ui-review");
+    prompt = interpolate(template, { focus });
+  } catch {
+    prompt = `You are an expert UI/UX reviewer. Review the content provided for usability, accessibility, clarity, and user experience.\n\nFocus: ${focus}\n\nProvide feedback on:\n1. **UX flow** — Is the user journey clear and intuitive?\n2. **Accessibility** — WCAG compliance, screen readers, keyboard nav\n3. **Copy & messaging** — Error messages, labels, help text clarity\n4. **Visual hierarchy** — Layout, spacing, affordances\n5. **Edge cases** — Empty states, loading states, error states\n\nBe specific and actionable.`;
+  }
+
+  if (context) {
+    return `${prompt}\n\n---\n\n${context}`;
+  }
+  return prompt;
+}
+
+function buildUiDesignPrompt(flags, positional) {
+  const focus = positional.join(" ") || "redesign the entire interface";
+  let context = "";
+
+  if (flags.file) {
+    const content = readFileContext(flags.file);
+    if (content) {
+      context = `File: ${flags.file}\n${content}`;
+    }
+  }
+
+  const stdin = readStdinIfPiped();
+  if (stdin) {
+    context += (context ? "\n\n" : "") + stdin;
+  }
+
+  let prompt;
+  try {
+    const template = loadPromptTemplate("ui-design");
+    prompt = interpolate(template, { focus });
+  } catch {
+    prompt = `You are a creative UI/UX designer. Provide opinionated, specific design suggestions.\n\nFocus: ${focus}\n\nBe specific — name exact colors (hex), spacing, fonts, layouts. Every suggestion must be implementable in CSS/HTML.`;
+  }
+
+  if (context) {
+    return `${prompt}\n\n---\n\n${context}`;
+  }
+  return prompt;
+}
+
+function buildTaskPrompt(flags, positional) {
+  const taskPrompt = positional.join(" ");
+  if (!taskPrompt) {
+    console.error("No task prompt provided.\nUsage: /gemini:task <prompt>");
+    process.exit(1);
+  }
+
+  const stdin = readStdinIfPiped();
+  if (stdin) {
+    return `${taskPrompt}\n\n---\n\n${stdin}`;
+  }
+  return taskPrompt;
+}
+
+// ─── Prompt builder dispatch ───────────────────────────────────────
+
+const PROMPT_BUILDERS = {
+  ask: buildAskPrompt,
+  review: buildReviewPrompt,
+  "adversarial-review": buildAdversarialReviewPrompt,
+  "ui-review": buildUiReviewPrompt,
+  "ui-design": buildUiDesignPrompt,
+  task: buildTaskPrompt,
+};
+
+// ─── Command handlers ──────────────────────────────────────────────
+
+async function runPromptCommand(command, flags, positional) {
+  const builder = PROMPT_BUILDERS[command];
+  if (!builder) {
+    console.error(`Unknown prompt command: ${command}`);
+    process.exit(1);
+  }
+
+  const prompt = builder(flags, positional);
+  if (prompt === null) {
+    console.log("No changes found to review.");
+    return;
+  }
+
+  // Build args array for the ACP bridge
+  const args = [prompt];
+  if (flags.model) { args.push("--model", flags.model); }
+  if (flags.background) { args.push("--background"); }
+  if (flags.stream) { args.push("--stream"); }
+  if (flags.resume) { args.push("--resume", flags.resume); }
+
+  // Streaming mode
+  if (flags.stream) {
+    console.error(`[gemini] Streaming ${command}...`);
+    let fullText = "";
+    for await (const event of streamGeminiAcp(command, args)) {
+      if (event.type === "text_delta" && event.text) {
+        process.stderr.write(event.text);
+        fullText += event.text;
+      }
+      if (event.terminal) {
+        const rendered = event.ok !== false
+          ? renderResult(event)
+          : renderError(event);
+        console.log("");
+        console.log(rendered);
+        break;
+      }
+    }
+    return;
+  }
+
+  // Background mode
+  if (flags.background) {
+    console.error(`[gemini] Launching ${command} in background...`);
+    const { ok, data } = await callGeminiAcp(command, args);
+    console.log(renderBackgroundLaunch(data));
+    return;
+  }
+
+  // Foreground (default)
+  console.error(`[gemini] Running ${command}...`);
+  const { ok, data, exitCode } = await callGeminiAcp(command, args);
+
+  if (ok) {
+    console.log(renderResult(data));
+  } else {
+    console.error(renderError(data));
+    process.exit(exitCode || 1);
+  }
+}
+
+async function cmdSetup() {
+  const { ok, data } = await callGeminiAcp("setup");
+  console.log(renderSetup(data));
+  if (!ok) process.exit(1);
+}
+
+async function cmdStatus(flags, positional) {
+  const args = [];
+  if (positional[0]) args.push(positional[0]);
+  if (flags.all) args.push("--all");
+  if (flags.json) args.push("--json");
+
+  const { ok, data } = await callGeminiAcp("status", args);
+
+  if (positional[0]) {
+    console.log(renderSingleJobStatus(data));
+  } else {
+    console.log(renderStatusList(data));
+  }
+  if (!ok) process.exit(1);
+}
+
+async function cmdResult(flags, positional) {
+  const args = [];
+  if (positional[0]) args.push(positional[0]);
+  if (flags.json) args.push("--json");
+
+  const { ok, data } = await callGeminiAcp("result", args);
+
+  if (ok) {
+    console.log(renderResult(data));
+  } else {
+    console.error(renderError(data));
+    process.exit(1);
+  }
+}
+
+async function cmdCancel(flags, positional) {
+  const args = [];
+  if (positional[0]) args.push(positional[0]);
+  if (flags.json) args.push("--json");
+
+  const { ok, data } = await callGeminiAcp("cancel", args);
+
+  if (ok) {
+    console.log(data.message || `Job ${positional[0] || ""} cancelled.`);
+  } else {
+    console.error(renderError(data));
+    process.exit(1);
+  }
+}
+
+async function cmdLogs(flags, positional) {
+  const args = [];
+  if (positional[0]) args.push(positional[0]);
+  if (flags.json) args.push("--json");
+
+  const { ok, data, stderr } = await callGeminiAcp("logs", args);
+
+  if (ok) {
+    console.log(data.text || data.logs || JSON.stringify(data, null, 2));
+  } else {
+    console.error(renderError(data));
+    process.exit(1);
+  }
+}
+
+// ─── Usage ─────────────────────────────────────────────────────────
 
 function printUsage() {
   console.log(
     [
       "Usage:",
-      "  node scripts/gemini-companion.mjs setup [--json]",
-      "  node scripts/gemini-companion.mjs ask [--background|--wait] [--model <model>] <question>",
-      "  node scripts/gemini-companion.mjs review [--background|--wait] [--base <ref>] [--scope <auto|working-tree|branch>] [focus]",
-      "  node scripts/gemini-companion.mjs ui-review [--background|--wait] [--file <path>] [focus]",
-      "  node scripts/gemini-companion.mjs task [--background|--wait] [--model <model>] [--yolo] <prompt>",
-      "  node scripts/gemini-companion.mjs ui-design [--background|--wait] [--file <path>] [--model <model>] [design brief]",
-      "  node scripts/gemini-companion.mjs adversarial-review [--background|--wait] [--base <ref>] [--scope <auto|working-tree|branch>] [focus]",
-      "  node scripts/gemini-companion.mjs status [job-id] [--all] [--json]",
-      "  node scripts/gemini-companion.mjs result [job-id] [--json]",
-      "  node scripts/gemini-companion.mjs cancel [job-id] [--json]",
+      "  gemini-companion.mjs setup",
+      "  gemini-companion.mjs ask [--background|--stream] [--model <model>] <question>",
+      "  gemini-companion.mjs review [--background|--stream] [--base <ref>] [--scope <auto|working-tree|branch>] [focus]",
+      "  gemini-companion.mjs adversarial-review [--background|--stream] [--base <ref>] [--scope <auto|working-tree|branch>] [focus]",
+      "  gemini-companion.mjs ui-review [--background|--stream] [--file <path>] [focus]",
+      "  gemini-companion.mjs ui-design [--background|--stream] [--file <path>] [--model <model>] [design brief]",
+      "  gemini-companion.mjs task [--background|--stream] [--model <model>] <prompt>",
+      "  gemini-companion.mjs status [job-id] [--all] [--json]",
+      "  gemini-companion.mjs result [job-id] [--json]",
+      "  gemini-companion.mjs cancel [job-id] [--json]",
+      "  gemini-companion.mjs logs [job-id] [--json]",
     ].join("\n")
   );
 }
 
-function outputResult(value, asJson) {
-  if (asJson) {
-    console.log(JSON.stringify(value, null, 2));
-  } else {
-    process.stdout.write(typeof value === "string" ? value : JSON.stringify(value, null, 2));
-  }
-}
-
-// ─── Background job launcher ────────────────────────────────────────
-
-function launchBackgroundWorker(jobId, kind, prompt, options = {}) {
-  const workspaceRoot = resolveWorkspaceRoot(process.cwd());
-  const logFile = createJobLogFile(workspaceRoot, jobId, `${kind} job`);
-
-  // Create initial job record
-  const jobRecord = createJobRecord({
-    id: jobId,
-    kind,
-    jobClass: kind,
-    title: `${kind}: ${(options.title || prompt).slice(0, 60)}`,
-    status: "queued",
-    phase: "queued",
-    workspaceRoot,
-    logFile,
-    prompt,
-    model: options.model || null,
-  });
-
-  writeJobFile(workspaceRoot, jobId, {
-    ...jobRecord,
-    prompt,
-    stdinPayload: options.stdinPayload || null,
-    mediaFiles: options.mediaFiles || [],
-  });
-  upsertJob(workspaceRoot, jobRecord);
-
-  // Spawn detached worker process
-  const workerArgs = [
-    SCRIPT_PATH,
-    "task-worker",
-    jobId,
-    "--kind", kind,
-  ];
-  if (options.model) workerArgs.push("--model", options.model);
-  if (options.yolo) workerArgs.push("--yolo");
-
-  const child = spawn("node", workerArgs, {
-    cwd: workspaceRoot,
-    detached: true,
-    stdio: ["ignore", "ignore", "ignore"],
-    env: {
-      ...process.env,
-      GEMINI_WORKER_JOB_ID: jobId,
-      GEMINI_WORKER_WORKSPACE: workspaceRoot,
-    },
-  });
-
-  child.unref();
-
-  // Update job with PID
-  upsertJob(workspaceRoot, { id: jobId, status: "running", phase: "starting", pid: child.pid });
-
-  return { jobId, logFile, pid: child.pid, workspaceRoot };
-}
-
-// ─── setup ──────────────────────────────────────────────────────────
-
-async function cmdSetup(flags) {
-  const status = await getGeminiAvailability();
-
-  const report = {
-    geminiAvailable: status.available,
-    version: status.version,
-    error: status.error,
-  };
-
-  if (flags.json) {
-    console.log(JSON.stringify(report, null, 2));
-  } else {
-    const lines = [];
-    if (status.available) {
-      lines.push(`Gemini CLI v${status.version} — ready.`);
-      lines.push("");
-      lines.push("Available commands:");
-      lines.push("  /gemini:ask <question>              — Ask Gemini anything");
-      lines.push("  /gemini:review [focus]               — Code review (uses git diff)");
-      lines.push("  /gemini:ui-review [focus]            — UI/UX review");
-      lines.push("  /gemini:task <prompt>                — Delegate a task to Gemini");
-      lines.push("  /gemini:ui-design [brief]              — Creative UI design suggestions");
-      lines.push("  /gemini:adversarial-review [focus]    — Hostile code review");
-      lines.push("  /gemini:status [job-id]              — Show job status");
-      lines.push("  /gemini:result [job-id]              — Show finished job result");
-      lines.push("  /gemini:cancel [job-id]              — Cancel an active job");
-      lines.push("");
-      lines.push("All action commands support --background and --wait flags.");
-    } else {
-      lines.push("Gemini CLI is not available.");
-      lines.push(`Error: ${status.error}`);
-      lines.push("");
-      lines.push("Install: npm install -g @google/gemini-cli");
-      lines.push("Then run: gemini (to authenticate with Google)");
-    }
-    console.log(lines.join("\n"));
-  }
-}
-
-// ─── Prompt builders ────────────────────────────────────────────────
-
-async function buildAskPrompt(flags, positional) {
-  const question = positional.join(" ");
-  if (!question) throw new Error("No question provided.\nUsage: /gemini:ask <question>");
-
-  const stdinContent = await readStdinIfPiped();
-  if (stdinContent) {
-    // Pipe large context via stdin, keep the question as the CLI arg
-    return { prompt: question, stdinPayload: stdinContent, title: question };
-  }
-  return { prompt: question, title: question };
-}
-
-async function buildReviewPrompt(flags, positional) {
-  const focus = positional.join(" ") || "general code review";
-  const base = flags.base || "HEAD";
-  const scope = flags.scope || "auto";
-
-  const diff = await getGitDiff(base, scope);
-  if (!diff) return { prompt: null, title: focus, empty: true };
-
-  let prompt;
-  try {
-    const template = await loadPromptTemplate("code-review");
-    prompt = interpolateTemplate(template, { focus });
-  } catch {
-    prompt = `You are an expert code reviewer. Review the git diff provided via stdin.\n\nFocus: ${focus}\n\nProvide:\n1. **Critical issues** — bugs, security problems, data loss risks\n2. **Important suggestions** — performance, maintainability, best practices\n3. **Minor notes** — style, naming, documentation\n\nBe specific: reference file names and line numbers from the diff.`;
-  }
-  return { prompt, stdinPayload: diff, title: `review: ${focus}` };
-}
-
-async function buildAdversarialReviewPrompt(flags, positional) {
-  const focus = positional.join(" ") || "find all bugs and security issues";
-  const base = flags.base || "HEAD";
-  const scope = flags.scope || "auto";
-
-  const diff = await getGitDiff(base, scope);
-  if (!diff) return { prompt: null, title: focus, empty: true };
-
-  let prompt;
-  try {
-    const template = await loadPromptTemplate("adversarial-review");
-    prompt = interpolateTemplate(template, { focus });
-  } catch {
-    prompt = `You are a hostile, adversarial code reviewer. Assume bugs exist. Review the git diff provided via stdin for security holes, race conditions, edge cases, data integrity issues, and failure modes. Be specific — file:line references, exploit scenarios, concrete fixes. Do NOT pad with praise.\n\nFocus: ${focus}`;
-  }
-  return { prompt, stdinPayload: diff, title: `adversarial-review: ${focus}` };
-}
-
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"]);
-
-function isImageFile(filePath) {
-  if (!filePath) return false;
-  const ext = filePath.toLowerCase().slice(filePath.lastIndexOf("."));
-  return IMAGE_EXTENSIONS.has(ext);
-}
-
-async function buildUiReviewPrompt(flags, positional) {
-  const focus = positional.join(" ") || "general UI/UX review";
-  let stdinPayload = "";
-  const mediaFiles = [];
-
-  if (flags.file) {
-    if (isImageFile(flags.file)) {
-      mediaFiles.push(flags.file);
-    } else {
-      const content = await readFileContext(flags.file);
-      if (content) {
-        stdinPayload = `File: ${flags.file}\n${content}`;
-      }
-    }
-  }
-
-  const stdinContent = await readStdinIfPiped();
-  if (stdinContent) {
-    stdinPayload += (stdinPayload ? "\n\n" : "") + stdinContent;
-  }
-
-  if (!stdinPayload && !mediaFiles.length) {
-    const diff = await getGitDiff();
-    if (diff) stdinPayload = diff;
-  }
-
-  let prompt;
-  try {
-    const template = await loadPromptTemplate("ui-review");
-    prompt = interpolateTemplate(template, { focus });
-  } catch {
-    prompt = `You are an expert UI/UX reviewer. Review the content provided via stdin for usability, accessibility, clarity, and user experience.\n\nFocus: ${focus}\n\nProvide feedback on:\n1. **UX flow** — Is the user journey clear and intuitive?\n2. **Accessibility** — WCAG compliance, screen readers, keyboard nav\n3. **Copy & messaging** — Error messages, labels, help text clarity\n4. **Visual hierarchy** — Layout, spacing, affordances\n5. **Edge cases** — Empty states, loading states, error states\n\nBe specific and actionable.`;
-  }
-  return {
-    prompt,
-    stdinPayload: stdinPayload || undefined,
-    title: `ui-review: ${focus}`,
-    mediaFiles: mediaFiles.length ? mediaFiles : undefined,
-  };
-}
-
-async function buildUiDesignPrompt(flags, positional) {
-  const focus = positional.join(" ") || "";
-  let stdinPayload = "";
-  const mediaFiles = [];
-
-  if (flags.file) {
-    if (isImageFile(flags.file)) {
-      mediaFiles.push(flags.file);
-    } else {
-      const content = await readFileContext(flags.file);
-      if (content) {
-        stdinPayload = `File: ${flags.file}\n${content}`;
-      }
-    }
-  }
-
-  const stdinContent = await readStdinIfPiped();
-  if (stdinContent) {
-    stdinPayload += (stdinPayload ? "\n\n" : "") + stdinContent;
-  }
-
-  let prompt;
-  try {
-    const template = await loadPromptTemplate("ui-design");
-    prompt = interpolateTemplate(template, { focus: focus || "redesign the entire interface" });
-  } catch {
-    prompt = `You are a creative UI/UX designer. Provide opinionated, specific design suggestions.\n\nFocus: ${focus || "redesign the entire interface"}\n\nBe specific — name exact colors (hex), spacing, fonts, layouts. Every suggestion must be implementable in CSS/HTML.`;
-  }
-
-  return {
-    prompt,
-    stdinPayload: stdinPayload || undefined,
-    title: `ui-design: ${focus || "full design"}`,
-    mediaFiles: mediaFiles.length ? mediaFiles : undefined,
-  };
-}
-
-async function buildTaskPrompt(flags, positional) {
-  const taskPrompt = positional.join(" ");
-  if (!taskPrompt) throw new Error("No task prompt provided.\nUsage: /gemini:task <prompt>");
-
-  const stdinContent = await readStdinIfPiped();
-  if (stdinContent) {
-    return { prompt: taskPrompt, stdinPayload: stdinContent, title: taskPrompt };
-  }
-  return { prompt: taskPrompt, title: taskPrompt };
-}
-
-// ─── Generic run-or-background handler ──────────────────────────────
-
-async function runCommand(kind, flags, positional, promptBuilder) {
-  const { prompt, stdinPayload, title, empty, mediaFiles } = await promptBuilder(flags, positional);
-
-  if (empty) {
-    console.log("No changes found to review.");
-    return;
-  }
-
-  const isBackground = flags.background === true;
-
-  if (isBackground) {
-    const jobId = generateJobId(kind.slice(0, 3));
-    const info = launchBackgroundWorker(jobId, kind, prompt, {
-      model: flags.model,
-      yolo: flags.yolo,
-      title,
-      stdinPayload,
-      mediaFiles,
-    });
-
-    const lines = [
-      `# Gemini ${kind} — background`,
-      "",
-      `Job **${info.jobId}** is running in the background (PID ${info.pid}).`,
-      "",
-      "Commands:",
-      `- Check progress: \`/gemini:status ${info.jobId}\``,
-      `- Get result: \`/gemini:result ${info.jobId}\``,
-      `- Cancel: \`/gemini:cancel ${info.jobId}\``,
-    ];
-    console.log(lines.join("\n"));
-    return;
-  }
-
-  // Foreground (--wait or default)
-  console.error(`[gemini] Running ${kind}...`);
-  const result = await runGeminiPrompt(prompt, {
-    model: flags.model,
-    yolo: flags.yolo || false,
-    resume: flags.resume || undefined,
-    mediaFiles,
-    stdin: stdinPayload,
-  });
-
-  if (result.exitCode !== 0) {
-    console.error(`Gemini exited with code ${result.exitCode}`);
-  }
-  console.log(result.text);
-}
-
-// ─── status ─────────────────────────────────────────────────────────
-
-async function cmdStatus(flags, positional) {
-  const reference = positional[0] || null;
-
-  if (reference) {
-    const { job } = buildSingleJobSnapshot(process.cwd(), reference);
-    const rendered = renderJobStatusReport(job);
-    outputResult(flags.json ? job : rendered, flags.json);
-    return;
-  }
-
-  const report = buildStatusSnapshot(process.cwd(), { all: flags.all });
-  const rendered = renderStatusReport(report);
-  outputResult(flags.json ? report : rendered, flags.json);
-}
-
-// ─── result ─────────────────────────────────────────────────────────
-
-async function cmdResult(flags, positional) {
-  const reference = positional[0] || null;
-  const { workspaceRoot, job } = resolveResultJob(process.cwd(), reference);
-  const storedJob = readStoredJob(workspaceRoot, job.id);
-
-  if (flags.json) {
-    outputResult({ job: enrichJob(job), storedJob }, true);
-    return;
-  }
-
-  const rendered = renderStoredJobResult(job, storedJob);
-  process.stdout.write(rendered);
-}
-
-// ─── cancel ─────────────────────────────────────────────────────────
-
-async function cmdCancel(flags, positional) {
-  const reference = positional[0] || null;
-  const { workspaceRoot, job } = resolveCancelableJob(process.cwd(), reference);
-
-  // Kill the process if it has a PID
-  if (job.pid) {
-    try {
-      await terminateProcessTree(job.pid);
-    } catch {
-      // Process may already be gone
-    }
-  }
-
-  // Update state
-  const completedAt = nowIso();
-  upsertJob(workspaceRoot, {
-    id: job.id,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    completedAt,
-  });
-
-  // Update job file
-  const jobFile = resolveJobFile(workspaceRoot, job.id);
-  if (fs.existsSync(jobFile)) {
-    const stored = readJobFile(jobFile);
-    writeJobFile(workspaceRoot, job.id, {
-      ...stored,
-      status: "cancelled",
-      phase: "cancelled",
-      pid: null,
-      completedAt,
-    });
-  }
-
-  appendLogLine(job.logFile, "Cancelled by user.");
-
-  const rendered = renderCancelReport(job);
-  outputResult(flags.json ? { cancelled: true, job } : rendered, flags.json);
-}
-
-// ─── task-worker (internal, spawned by background launcher) ─────────
-
-async function cmdTaskWorker(flags, positional) {
-  const jobId = positional[0] || process.env.GEMINI_WORKER_JOB_ID;
-  const workspaceRoot = process.env.GEMINI_WORKER_WORKSPACE || process.cwd();
-
-  if (!jobId) {
-    process.exit(1);
-  }
-
-  // Read the job file to get the prompt
-  const jobFile = resolveJobFile(workspaceRoot, jobId);
-  if (!fs.existsSync(jobFile)) {
-    process.exit(1);
-  }
-
-  const jobData = readJobFile(jobFile);
-  const logFile = jobData.logFile || resolveJobLogFile(workspaceRoot, jobId);
-  const prompt = jobData.prompt;
-  const stdinPayload = jobData.stdinPayload || null;
-  const mediaFiles = jobData.mediaFiles || [];
-
-  if (!prompt) {
-    appendLogLine(logFile, "No prompt found in job file.");
-    upsertJob(workspaceRoot, { id: jobId, status: "failed", phase: "failed", pid: null, completedAt: nowIso() });
-    process.exit(1);
-  }
-
-  appendLogLine(logFile, `Worker started (PID ${process.pid}).`);
-  appendLogLine(logFile, `Running Gemini ${flags.kind || "task"}...`);
-
-  // Update job to running
-  upsertJob(workspaceRoot, { id: jobId, status: "running", phase: "running", pid: process.pid });
-
-  try {
-    const result = await runGeminiPrompt(prompt, {
-      model: flags.model,
-      yolo: flags.yolo || false,
-      timeout: 600_000, // 10 min for background jobs
-      stdin: stdinPayload,
-      mediaFiles: mediaFiles.length ? mediaFiles : undefined,
-    });
-
-    const completionStatus = result.exitCode === 0 ? "completed" : "failed";
-    const completedAt = nowIso();
-
-    // Summarize: first 120 chars of response
-    const summary = result.text
-      ? result.text.replace(/\s+/g, " ").trim().slice(0, 120) + (result.text.length > 120 ? "..." : "")
-      : null;
-
-    writeJobFile(workspaceRoot, jobId, {
-      ...jobData,
-      status: completionStatus,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      pid: null,
-      completedAt,
-      exitCode: result.exitCode,
-      result: result.text,
-      rendered: result.text,
-      summary,
-    });
-
-    upsertJob(workspaceRoot, {
-      id: jobId,
-      status: completionStatus,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      pid: null,
-      completedAt,
-      summary,
-    });
-
-    appendLogLine(logFile, `Completed with exit code ${result.exitCode}.`);
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const completedAt = nowIso();
-
-    writeJobFile(workspaceRoot, jobId, {
-      ...jobData,
-      status: "failed",
-      phase: "failed",
-      pid: null,
-      completedAt,
-      errorMessage,
-    });
-
-    upsertJob(workspaceRoot, {
-      id: jobId,
-      status: "failed",
-      phase: "failed",
-      pid: null,
-      completedAt,
-      errorMessage,
-    });
-
-    appendLogLine(logFile, `Failed: ${errorMessage}`);
-    process.exit(1);
-  }
-}
-
-// ─── main ───────────────────────────────────────────────────────────
+// ─── Main ──────────────────────────────────────────────────────────
 
 async function main() {
   const rawArgs = process.argv.slice(2);
@@ -581,38 +397,34 @@ async function main() {
 
   switch (subcommand) {
     case "setup":
-      await cmdSetup(flags);
+      await cmdSetup();
       break;
+
     case "ask":
-      await runCommand("ask", flags, positional, buildAskPrompt);
-      break;
     case "review":
-      await runCommand("review", flags, positional, buildReviewPrompt);
-      break;
-    case "ui-review":
-      await runCommand("ui-review", flags, positional, buildUiReviewPrompt);
-      break;
-    case "ui-design":
-      await runCommand("ui-design", flags, positional, buildUiDesignPrompt);
-      break;
-    case "task":
-      await runCommand("task", flags, positional, buildTaskPrompt);
-      break;
     case "adversarial-review":
-      await runCommand("adversarial-review", flags, positional, buildAdversarialReviewPrompt);
+    case "ui-review":
+    case "ui-design":
+    case "task":
+      await runPromptCommand(subcommand, flags, positional);
       break;
+
     case "status":
       await cmdStatus(flags, positional);
       break;
+
     case "result":
       await cmdResult(flags, positional);
       break;
+
     case "cancel":
       await cmdCancel(flags, positional);
       break;
-    case "task-worker":
-      await cmdTaskWorker(flags, positional);
+
+    case "logs":
+      await cmdLogs(flags, positional);
       break;
+
     default:
       console.error(`Unknown subcommand: ${subcommand}`);
       printUsage();

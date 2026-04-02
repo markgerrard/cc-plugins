@@ -55,7 +55,7 @@ export function parseArgs(argv) {
     if (arg.startsWith("--")) {
       const key = arg.slice(2);
       // Boolean flags
-      if (["wait", "background", "json", "yolo", "all"].includes(key)) {
+      if (["wait", "background", "stream", "json", "yolo", "all"].includes(key)) {
         flags[key] = true;
         i++;
         continue;
