@@ -154,30 +154,45 @@ export function renderSingleJobStatus(data) {
  * @returns {string}
  */
 export function renderSetup(data) {
+  if (!data || data.ok === undefined) {
+    return "**Error:** No response from Gemini ACP runtime.";
+  }
+
   if (!data.ok) {
-    const lines = [];
-    if (data.error) lines.push(`**Error:** ${data.error}`);
-    if (data.errors?.length) {
-      for (const err of data.errors) lines.push(`- ${err}`);
+    const lines = ["Gemini ACP — not ready.", ""];
+    if (data.gemini_found === false) {
+      lines.push("- Gemini CLI not found in PATH");
+      lines.push("  Install: `npm install -g @google/gemini-cli`");
+    } else if (data.acp_supported === false) {
+      lines.push(`- Gemini CLI v${data.gemini_version || "?"} does not support --acp`);
+      lines.push("  Update: `npm install -g @google/gemini-cli`");
+    } else if (data.auth_valid === false) {
+      lines.push("- ACP auth failed (non-interactive handshake)");
+      lines.push("  Run `gemini` in a terminal first to authenticate");
     }
-    lines.push("");
-    lines.push("**Install instructions:**");
-    lines.push("- Install the Gemini CLI: `pip install gemini-cli` or see the project README");
-    lines.push("- Ensure `GEMINI_API_KEY` is set in your environment");
+    if (data.errors?.length) {
+      lines.push("");
+      for (const err of data.errors) lines.push(`  ${err}`);
+    }
     return lines.join("\n");
   }
 
-  const lines = [];
-  if (data.version) lines.push(`**Gemini CLI version:** ${data.version}`);
-  lines.push("");
-
-  const commands = data.commands ?? data.available_commands;
-  if (commands?.length) {
-    lines.push("**Available commands:**");
-    for (const cmd of commands) {
-      lines.push(`- \`${cmd}\``);
-    }
-  }
-
+  const lines = [
+    `Gemini CLI v${data.gemini_version || "?"} — ACP ready.`,
+    "",
+    "Available commands:",
+    "  /gemini:ask <question>               — Ask Gemini anything",
+    "  /gemini:task <prompt>                 — Delegate a task (with tool use)",
+    "  /gemini:review [focus]                — Code review (uses git diff)",
+    "  /gemini:ui-review [focus]             — UI/UX review",
+    "  /gemini:ui-design [brief]             — Creative UI design",
+    "  /gemini:adversarial-review [focus]     — Hostile code review",
+    "  /gemini:status [--job id]             — Show job status",
+    "  /gemini:result [--job id]             — Show finished job result",
+    "  /gemini:cancel [--job id]             — Cancel an active job",
+    "  /gemini:logs [--job id]               — Show event log",
+    "",
+    "All action commands support --background and --stream flags.",
+  ];
   return lines.join("\n");
 }

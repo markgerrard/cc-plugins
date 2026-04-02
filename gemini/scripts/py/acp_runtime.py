@@ -233,7 +233,7 @@ class GeminiAcpTransport(AgentTransport):
         self,
         job_id: str,
         *,
-        handshake_timeout_s: float = 10.0,
+        handshake_timeout_s: float = 20.0,
         shutdown_timeout_s: float = 5.0,
         cancel_timeout_s: float = 10.0,
     ) -> None:
@@ -323,7 +323,7 @@ class GeminiAcpTransport(AgentTransport):
             # Drain everything currently in the queue
             while self.client._events:
                 record = self.client._events.popleft()
-                yield record.__dict__
+                yield record
 
             # Check termination conditions
             if self.client._prompt_done and not self.client._events:

@@ -280,7 +280,7 @@ def _make_env_fingerprint(cwd: str) -> str:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-async def run_preflight(cwd: str, handshake_timeout_s: float = 10.0) -> PreflightResult:
+async def run_preflight(cwd: str, handshake_timeout_s: float = 20.0) -> PreflightResult:
     """Run all preflight checks in order. Returns a PreflightResult.
 
     Results are cached per (cwd, env_fingerprint) for 60 seconds.

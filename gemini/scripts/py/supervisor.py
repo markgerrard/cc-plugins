@@ -148,8 +148,7 @@ async def run_foreground(
 
         # 10. Stream events
         tokens: dict = {}
-        async for event_dict in transport.stream_events():
-            er = EventRecord(**{k: v for k, v in event_dict.items() if k in EventRecord.__dataclass_fields__})
+        async for er in transport.stream_events():
             append_event(job_id, er)
             if stream:
                 print(er.to_json(), flush=True)
@@ -201,7 +200,9 @@ async def run_foreground(
     except Exception as exc:
         # 12. Error handling
         ended_at = now_iso()
-        error_msg = str(exc) or "unknown error"
+        import traceback
+        error_msg = str(exc) or repr(exc) or "unknown error"
+        print(traceback.format_exc(), file=sys.stderr)
         err_envelope = ErrorEnvelope(
             command=command,
             error=error_msg,

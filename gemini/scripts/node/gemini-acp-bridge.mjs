@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const GEMINI_ACP_PATH = path.resolve(__dirname, "..", "..", "gemini-acp.py");
+const GEMINI_ACP_PATH = path.resolve(__dirname, "..", "gemini-acp.py");
 
 function tryParseJson(str) {
   try { return JSON.parse(str); } catch { return null; }
