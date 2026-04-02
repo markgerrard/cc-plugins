@@ -48,49 +48,57 @@ async def run_foreground(
     resume_job_id: Optional[str] = None,
     stream: bool = False,
     output_mode: str = "json",
+    existing_job_id: Optional[str] = None,
 ) -> None:
     """Run a prompt synchronously, printing results to stdout."""
 
     # 1. Resolve model alias
     model = resolve_model_alias(model)
 
-    # 2. Preflight
-    preflight = await run_preflight(cwd)
-    if not preflight.ok:
-        env = ErrorEnvelope(
+    # 2. Preflight (skip if existing_job_id — worker already ran preflight)
+    if not existing_job_id:
+        preflight = await run_preflight(cwd)
+        if not preflight.ok:
+            env = ErrorEnvelope(
+                command=command,
+                error=preflight.errors[0] if preflight.errors else "preflight failed",
+                error_code=preflight.first_error_code or ErrorCode.RUNTIME_EXCEPTION.value,
+                exit_code=2,
+            )
+            print(env.to_json(), flush=True)
+            sys.exit(2)
+
+    # 3. Create or reuse job record
+    if existing_job_id:
+        job_id = existing_job_id
+        existing = read_job(job_id)
+        session_id = existing.session_id if existing else None
+        parent_job_id = existing.parent_job_id if existing else None
+    else:
+        job_id = generate_job_id()
+        parent_job_id = None
+        session_id = None
+
+        if resume_job_id:
+            parent = read_job(resume_job_id)
+            if parent is not None:
+                session_id = parent.session_id
+                parent_job_id = resume_job_id
+
+        record = JobRecord(
+            job_id=job_id,
             command=command,
-            error=preflight.errors[0] if preflight.errors else "preflight failed",
-            error_code=preflight.first_error_code or ErrorCode.RUNTIME_EXCEPTION.value,
-            exit_code=2,
+            prompt=prompt,
+            cwd=cwd,
+            model=model,
+            parent_job_id=parent_job_id,
+            session_id=session_id,
+            status=JobStatus.QUEUED.value,
+            mode="foreground",
+            output_mode=output_mode,
+            env_fingerprint=preflight.env_fingerprint,
         )
-        print(env.to_json(), flush=True)
-        sys.exit(2)
-
-    # 3. Create job record
-    job_id = generate_job_id()
-    parent_job_id: Optional[str] = None
-    session_id: Optional[str] = None
-
-    if resume_job_id:
-        parent = read_job(resume_job_id)
-        if parent is not None:
-            session_id = parent.session_id
-            parent_job_id = resume_job_id
-
-    record = JobRecord(
-        job_id=job_id,
-        command=command,
-        prompt=prompt,
-        cwd=cwd,
-        model=model,
-        parent_job_id=parent_job_id,
-        session_id=session_id,
-        status=JobStatus.QUEUED.value,
-        mode="foreground",
-        output_mode=output_mode,
-        env_fingerprint=preflight.env_fingerprint,
-    )
-    create_job(record)
+        create_job(record)
 
     # 4. Create transport
     transport = GeminiAcpTransport(job_id=job_id)
@@ -342,7 +350,7 @@ async def run_worker(job_id: str) -> None:
     try:
         sys.stdout = open(os.devnull, "w")
 
-        # 4. Run foreground with the job's parameters
+        # 4. Run foreground with the existing job ID
         try:
             await run_foreground(
                 command=job.command,
@@ -352,6 +360,7 @@ async def run_worker(job_id: str) -> None:
                 resume_job_id=job.parent_job_id,
                 stream=False,
                 output_mode=job.output_mode,
+                existing_job_id=job_id,
             )
         except SystemExit:
             # run_foreground may sys.exit on failure — that's fine
