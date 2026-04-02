@@ -298,7 +298,18 @@ async function runPromptCommand(command, flags, positional) {
 async function cmdSetup() {
   const { ok, data } = await callGeminiAcp("setup");
   console.log(renderSetup(data));
-  if (!ok) process.exit(1);
+  if (!ok) {
+    process.exit(1);
+    return;
+  }
+  // Auto-warm the pool on successful setup
+  console.error("[gemini] Warming ACP pool...");
+  const pool = await callGeminiAcp("pool-warm");
+  if (pool.ok) {
+    console.error("[gemini] Pool warm — subsequent calls will be fast.");
+  } else {
+    console.error("[gemini] Pool warm failed — will use cold start.");
+  }
 }
 
 async function cmdStatus(flags, positional) {

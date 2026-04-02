@@ -20,6 +20,7 @@ from py.preflight import run_preflight
 from py.job_model import read_job, list_jobs_for_cwd, reconcile_stale, read_result
 from py.events import read_events
 from py.supervisor import run_foreground, launch_background, run_worker, cancel_job
+from py.pool import PoolDaemon, is_pool_alive, start_pool_daemon, stop_pool_daemon
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     worker = subparsers.add_parser("worker-run", help="Internal: run background worker")
     worker.add_argument("--job", metavar="JOB_ID", required=True, help="Job ID to run")
+
+    # pool-start / pool-stop (internal)
+    subparsers.add_parser("pool-start", help="Start the warm pool daemon")
+    subparsers.add_parser("pool-stop", help="Stop the warm pool daemon")
+    subparsers.add_parser("pool-warm", help="Ensure pool is running (start if needed)")
 
     return parser
 
@@ -344,6 +350,23 @@ async def main() -> None:
 
     elif command == "worker-run":
         await run_worker(args.job)
+
+    elif command == "pool-start":
+        daemon = PoolDaemon()
+        await daemon.run()
+
+    elif command == "pool-stop":
+        stop_pool_daemon()
+        print(json.dumps({"ok": True, "message": "pool stopped"}))
+
+    elif command == "pool-warm":
+        if is_pool_alive():
+            print(json.dumps({"ok": True, "message": "pool already running"}))
+        elif start_pool_daemon():
+            print(json.dumps({"ok": True, "message": "pool started"}))
+        else:
+            print(json.dumps({"ok": False, "error": "failed to start pool"}))
+            sys.exit(1)
 
     else:
         parser.print_help()

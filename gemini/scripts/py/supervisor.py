@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .pool import is_pool_alive, pool_prompt, start_pool_daemon
 from .schemas import (
     ErrorCode,
     ErrorEnvelope,
@@ -54,6 +55,26 @@ async def run_foreground(
 
     # 1. Resolve model alias
     model = resolve_model_alias(model)
+
+    # 1b. Fast path: if pool is alive, skip preflight entirely
+    if not existing_job_id and is_pool_alive():
+        job_id = generate_job_id()
+        session_id = None
+        if resume_job_id:
+            parent = read_job(resume_job_id)
+            if parent is not None:
+                session_id = parent.session_id
+        record = JobRecord(
+            job_id=job_id, command=command, prompt=prompt, cwd=cwd,
+            model=model, parent_job_id=resume_job_id if resume_job_id else None,
+            session_id=session_id, status=JobStatus.QUEUED.value,
+            mode="foreground", output_mode=output_mode,
+        )
+        create_job(record)
+        return await _run_via_pool(
+            command=command, prompt=prompt, cwd=cwd, model=model,
+            job_id=job_id, session_id=session_id, stream=stream,
+        )
 
     # 2. Preflight (skip if existing_job_id — worker already ran preflight)
     if not existing_job_id:
@@ -100,7 +121,7 @@ async def run_foreground(
         )
         create_job(record)
 
-    # 4. Create transport
+    # 4. Cold start — create transport
     transport = GeminiAcpTransport(job_id=job_id)
     started_at: Optional[str] = None
 
@@ -462,3 +483,97 @@ async def cancel_job(job_id: str) -> str:
         "status": "cancelled",
         "message": "job cancelled",
     })
+
+
+# ---------------------------------------------------------------------------
+# Pool fast path
+# ---------------------------------------------------------------------------
+
+async def _run_via_pool(
+    command: str,
+    prompt: str,
+    cwd: str,
+    model: Optional[str],
+    job_id: str,
+    session_id: Optional[str],
+    stream: bool,
+) -> None:
+    """Run a prompt through the warm pool daemon instead of cold-starting."""
+    started_at = now_iso()
+    update_job(job_id, status=JobStatus.RUNNING.value, started_at=started_at)
+
+    try:
+        events, result = await pool_prompt(
+            command=command,
+            prompt=prompt,
+            job_id=job_id,
+            model=model,
+            session_id=session_id,
+        )
+
+        # Persist events
+        for ev in events:
+            # Pool events may not have all required fields — fill defaults
+            ev_data = {k: v for k, v in ev.items() if k in EventRecord.__dataclass_fields__}
+            ev_data.setdefault("event", ev.get("type", "unknown"))
+            ev_data.setdefault("source", EventSource.RUNTIME.value)
+            ev_data.setdefault("job_id", job_id)
+            er = EventRecord(**ev_data)
+            append_event(job_id, er)
+            if stream:
+                print(json.dumps(ev), flush=True)
+
+        ended_at = now_iso()
+
+        if result.get("ok"):
+            text = result.get("text", "")
+            tokens = result.get("tokens")
+            pool_session_id = result.get("session_id", session_id)
+
+            try:
+                t0 = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+                duration_ms = int((t1 - t0).total_seconds() * 1000)
+            except Exception:
+                duration_ms = 0
+
+            envelope = SuccessEnvelope(
+                command=command,
+                job_id=job_id,
+                session_id=pool_session_id,
+                cwd=cwd,
+                model=model,
+                text=text,
+                tokens=tokens,
+                duration_ms=duration_ms,
+                started_at=started_at,
+                ended_at=ended_at,
+            )
+            update_job(job_id, status=JobStatus.COMPLETED.value, ended_at=ended_at,
+                       session_id=pool_session_id, result_available=True, exit_code=0)
+            write_result(job_id, envelope.to_json())
+            print(envelope.to_json(), flush=True)
+        else:
+            error_msg = result.get("error", "pool error")
+            err_envelope = ErrorEnvelope(
+                command=command, error=error_msg,
+                error_code=result.get("error_code", "pool_error"), exit_code=1,
+            )
+            update_job(job_id, status=JobStatus.FAILED.value, ended_at=ended_at,
+                       error=error_msg, exit_code=1)
+            write_result(job_id, err_envelope.to_json())
+            print(err_envelope.to_json(), flush=True)
+            sys.exit(1)
+
+    except Exception as exc:
+        ended_at = now_iso()
+        error_msg = str(exc) or repr(exc) or "pool connection error"
+        err_envelope = ErrorEnvelope(
+            command=command, error=error_msg,
+            error_code="pool_error", exit_code=1,
+        )
+        update_job(job_id, status=JobStatus.FAILED.value, ended_at=ended_at,
+                   error=error_msg, exit_code=1)
+        write_result(job_id, err_envelope.to_json())
+        print(err_envelope.to_json(), flush=True)
+        sys.exit(1)
