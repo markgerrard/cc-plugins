@@ -60,6 +60,7 @@ import {
 } from "./lib/render.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
+import { createPiClient } from "./lib/pi-rpc.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 
@@ -234,7 +235,9 @@ async function buildReviewPrompt(flags, positional) {
 async function runCommand(kind, flags, positional, promptBuilder) {
   const { prompt, systemPrompt, title } = await promptBuilder(flags, positional);
 
-  const isBackground = flags.background === true;
+  // task and review auto-background unless --wait is explicitly passed
+  const autoBackground = (kind === "task" || kind === "review") && flags.wait !== true;
+  const isBackground = flags.background === true || autoBackground;
 
   if (isBackground) {
     const jobId = generateJobId(kind.slice(0, 3));
@@ -398,6 +401,56 @@ async function cmdTaskWorker(flags, positional) {
   }
 }
 
+// ─── code (Pi RPC) ──────────────────────────────────────────────────
+
+async function cmdCode(flags, positional) {
+  const task = positional.join(" ");
+  if (!task) {
+    console.error("Error: No task provided.\nUsage: /minimax:code <task>");
+    process.exit(1);
+  }
+
+  const model = normalizeRequestedModel(flags.model);
+  console.error(`[minimax:code] Starting Pi with MiniMax (${model})...`);
+
+  const workDir = resolveWorkspaceRoot(process.cwd());
+  console.error(`[minimax:code] Working directory: ${workDir}`);
+
+  const pi = createPiClient({
+    provider: "minimax",
+    model: model,
+    cwd: workDir,
+  });
+
+  try {
+    await pi.start();
+    console.error("[minimax:code] Pi started. Sending task...");
+
+    const events = await pi.promptAndWait(task, 300_000);
+
+    let finalText;
+    try {
+      finalText = await pi.getLastAssistantText();
+    } catch {
+      const textParts = [];
+      for (const event of events) {
+        if (event.type === "text_delta") textParts.push(event.text || event.delta || "");
+        if (event.type === "tool_start") console.error(`[minimax:code] Tool: ${event.tool}`);
+      }
+      finalText = textParts.join("") || "(No output captured)";
+    }
+
+    // Strip think tags from reasoning models
+    finalText = finalText.replace(/<think>[\s\S]*?<\/think>\s*/g, "").trim();
+    console.log(finalText);
+  } catch (err) {
+    console.error(`[minimax:code] Error: ${err.message}`);
+    process.exit(1);
+  } finally {
+    await pi.stop();
+  }
+}
+
 // ─── main ───────────────────────────────────────────────────────────
 
 async function main() {
@@ -415,6 +468,7 @@ async function main() {
     case "status":      await cmdStatus(flags, positional); break;
     case "result":      await cmdResult(flags, positional); break;
     case "cancel":      await cmdCancel(flags, positional); break;
+    case "code":        await cmdCode(flags, positional); break;
     case "task-worker": await cmdTaskWorker(flags, positional); break;
     default:
       console.error(`Unknown subcommand: ${subcommand}`);
