@@ -69,8 +69,8 @@ export async function runGeminiPrompt(prompt, options = {}) {
   if (resume) args.push("--resume", resume);
   args.push("-o", "text");
   if (mediaFiles?.length) {
-    // Media files: gemini -p "prompt" image.png (non-interactive with media)
-    args.push("-p", prompt);
+    // Media files: gemini "prompt" image.png (positional args, no -p flag)
+    args.push(prompt);
     args.push(...mediaFiles);
   } else if (stdin) {
     // When piping stdin, use -p so Gemini reads stdin as context
