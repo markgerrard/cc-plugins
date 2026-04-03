@@ -7,10 +7,17 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 // Default model set for compare/consensus
-export const DEFAULT_MODELS = ["gemini", "grok", "glm", "minimax"];
+export const DEFAULT_MODELS = ["gemini", "grok", "glm"];
 
 // Model definitions — how to call each one
 const MODEL_REGISTRY = {
+  codex: {
+    name: "Codex",
+    command: "ask",
+    companion: "codex-companion.mjs",
+    marketplace: "openai-codex",
+    plugin: "codex",
+  },
   gemini: {
     name: "Gemini",
     command: "ask",
