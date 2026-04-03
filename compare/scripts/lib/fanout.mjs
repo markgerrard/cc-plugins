@@ -7,11 +7,10 @@ import { spawn } from "node:child_process";
 import { getModel, resolveCompanionPath } from "./models.mjs";
 
 /**
- * Call a single model's companion script and return the response text.
- * @param {string} modelKey - Model key (e.g., "gemini", "grok")
- * @param {string} prompt - The prompt to send
- * @param {number} timeout - Timeout in ms
- * @returns {Promise<{model: string, text: string, durationMs: number, error: string|null}>}
+ * Call a single model and return the response text.
+ * Supports two types:
+ *   - "companion" (default): spawn node <companion-script> <command> <prompt>
+ *   - "cli": spawn <binary> <cliArgs...> <prompt>
  */
 function callModel(modelKey, prompt, timeout = 300_000) {
   const def = getModel(modelKey);
@@ -24,20 +23,31 @@ function callModel(modelKey, prompt, timeout = 300_000) {
     });
   }
 
-  const companionPath = resolveCompanionPath(modelKey);
-  if (!companionPath) {
-    return Promise.resolve({
-      model: def.name,
-      text: null,
-      durationMs: 0,
-      error: `Plugin not installed for ${def.name}`,
-    });
+  let cmd, args;
+
+  if (def.type === "cli") {
+    // Direct CLI binary (e.g., codex exec)
+    cmd = def.binary;
+    args = [...(def.cliArgs || []), prompt];
+  } else {
+    // Node companion script (default)
+    const companionPath = resolveCompanionPath(modelKey);
+    if (!companionPath) {
+      return Promise.resolve({
+        model: def.name,
+        text: null,
+        durationMs: 0,
+        error: `Plugin not installed for ${def.name}`,
+      });
+    }
+    cmd = "node";
+    args = [companionPath, def.command, prompt];
   }
 
   const start = Date.now();
 
   return new Promise((resolve) => {
-    const proc = spawn("node", [companionPath, def.command, prompt], {
+    const proc = spawn(cmd, args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env },
       timeout,
