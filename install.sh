@@ -3,88 +3,150 @@ set -euo pipefail
 
 # install.sh — Install LLM plugins into Claude Code
 #
+# Handles all four registration points:
+#   1. Cache: copy plugin files to ~/.claude/plugins/cache/
+#   2. installed_plugins.json: register plugin version + path
+#   3. settings.json: enable plugin + register marketplace
+#   4. known_marketplaces.json: register marketplace source
+#
 # Usage:
-#   ./install.sh          Install all plugins
-#   ./install.sh codex    Install Codex only
-#   ./install.sh gemini   Install Gemini only
-#   ./install.sh grok     Install Grok only
-#   ./install.sh glm      Install GLM only
-#   ./install.sh minimax  Install MiniMax only
-#   ./install.sh banana   Install Nano Banana only
-#   ./install.sh pi       Install Pi coding agent (for /glm:code, /minimax:code)
+#   ./install.sh                Install all plugins
+#   ./install.sh codex          Install Codex only
+#   ./install.sh gemini         Install Gemini only
+#   ./install.sh grok           Install Grok only
+#   ./install.sh glm            Install GLM only
+#   ./install.sh minimax        Install MiniMax only
+#   ./install.sh banana         Install Nano Banana only
+#   ./install.sh pi             Install Pi coding agent
+#   ./install.sh uninstall      Remove all plugins
+#   ./install.sh vibe           Install Mistral Vibe only
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGINS_DIR="${HOME}/.claude/plugins"
+CLAUDE_DIR="${HOME}/.claude"
+PLUGINS_DIR="${CLAUDE_DIR}/plugins"
 CACHE_DIR="${PLUGINS_DIR}/cache"
+MARKETPLACE_DIR="${PLUGINS_DIR}/marketplaces"
 INSTALLED_FILE="${PLUGINS_DIR}/installed_plugins.json"
-
-# Plugin source paths (inside this repo)
-CODEX_SRC="${SCRIPT_DIR}/codex/plugins/codex"
-GEMINI_SRC="${SCRIPT_DIR}/gemini"
-GROK_SRC="${SCRIPT_DIR}/grok"
-GLM_SRC="${SCRIPT_DIR}/glm"
-MINIMAX_SRC="${SCRIPT_DIR}/minimax"
-BANANA_SRC="${SCRIPT_DIR}/nano-banana"
-
-# Plugin install paths
-CODEX_DEST="${CACHE_DIR}/openai-codex/codex/local"
-GEMINI_DEST="${CACHE_DIR}/google-gemini/gemini/local"
-GROK_DEST="${CACHE_DIR}/xai-grok/grok/local"
-GLM_DEST="${CACHE_DIR}/zhipu-glm/glm/local"
-MINIMAX_DEST="${CACHE_DIR}/minimax/minimax/local"
-BANANA_DEST="${CACHE_DIR}/nano-banana/nano-banana/local"
-
-# Plugin registry keys
-CODEX_KEY="codex@openai-codex"
-GEMINI_KEY="gemini@google-gemini"
-GROK_KEY="grok@xai-grok"
-GLM_KEY="glm@zhipu-glm"
-MINIMAX_KEY="minimax@minimax"
-BANANA_KEY="nano-banana@nano-banana"
-
-PI_SRC="${SCRIPT_DIR}/pi"
+KNOWN_MP_FILE="${PLUGINS_DIR}/known_marketplaces.json"
+SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
 
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+# ─── Plugin definitions ──────────────────────────────────────────────
+# Each plugin: NAME SRC_DIR MARKETPLACE PLUGIN_NAME VERSION
+
+declare -A PLUGIN_SRC PLUGIN_MP PLUGIN_NAME PLUGIN_VER
+
+PLUGIN_SRC[codex]="${SCRIPT_DIR}/codex/plugins/codex"
+PLUGIN_MP[codex]="openai-codex"
+PLUGIN_NAME[codex]="codex"
+PLUGIN_VER[codex]="local"
+
+PLUGIN_SRC[gemini]="${SCRIPT_DIR}/gemini"
+PLUGIN_MP[gemini]="google-gemini"
+PLUGIN_NAME[gemini]="gemini"
+PLUGIN_VER[gemini]="local"
+
+PLUGIN_SRC[grok]="${SCRIPT_DIR}/grok"
+PLUGIN_MP[grok]="xai-grok"
+PLUGIN_NAME[grok]="grok"
+PLUGIN_VER[grok]="local"
+
+PLUGIN_SRC[glm]="${SCRIPT_DIR}/glm"
+PLUGIN_MP[glm]="zhipu-glm"
+PLUGIN_NAME[glm]="glm"
+PLUGIN_VER[glm]="local"
+
+PLUGIN_SRC[minimax]="${SCRIPT_DIR}/minimax"
+PLUGIN_MP[minimax]="minimax"
+PLUGIN_NAME[minimax]="minimax"
+PLUGIN_VER[minimax]="local"
+
+PLUGIN_SRC[banana]="${SCRIPT_DIR}/nano-banana"
+PLUGIN_MP[banana]="nano-banana"
+PLUGIN_NAME[banana]="nano-banana"
+PLUGIN_VER[banana]="local"
+
+ALL_PLUGINS=(codex gemini grok glm minimax banana)
 
 info()  { echo "  [+] $1"; }
 warn()  { echo "  [!] $1"; }
 error() { echo "  [x] $1" >&2; exit 1; }
 
-install_plugin() {
-  local name="$1" src="$2" dest="$3" key="$4" version="$5"
+# ─── Helpers ─────────────────────────────────────────────────────────
 
-  # Verify source exists
+ensure_json_file() {
+  local file="$1" default="$2"
+  if [ ! -f "$file" ]; then
+    echo "$default" > "$file"
+  fi
+}
+
+check_jq() {
+  if ! command -v jq &>/dev/null; then
+    error "jq is required. Install: apt install jq / brew install jq"
+  fi
+}
+
+# ─── Core install function ───────────────────────────────────────────
+
+install_plugin() {
+  local slug="$1"
+  local src="${PLUGIN_SRC[$slug]}"
+  local marketplace="${PLUGIN_MP[$slug]}"
+  local plugin_name="${PLUGIN_NAME[$slug]}"
+  local version="${PLUGIN_VER[$slug]}"
+  local key="${plugin_name}@${marketplace}"
+  local dest="${CACHE_DIR}/${marketplace}/${plugin_name}/${version}"
+  local mp_dir="${MARKETPLACE_DIR}/${marketplace}"
+
+  # Verify source
   if [ ! -d "$src" ]; then
-    error "${name} source not found at ${src}"
+    error "${slug}: source not found at ${src}"
   fi
   if [ ! -f "${src}/.claude-plugin/plugin.json" ]; then
-    error "${name} source missing .claude-plugin/plugin.json"
+    error "${slug}: missing .claude-plugin/plugin.json"
   fi
 
-  # Create destination and sync
+  # ── 1. Cache: copy plugin files ──
   mkdir -p "$(dirname "$dest")"
   if [ -d "$dest" ]; then
-    info "${name}: updating existing install at ${dest}"
-    rsync -a --delete "$src/" "$dest/"
+    info "${slug}: updating cache at ${dest}"
   else
-    info "${name}: installing to ${dest}"
-    rsync -a "$src/" "$dest/"
+    info "${slug}: installing to cache at ${dest}"
+  fi
+  rsync -a --delete --exclude='__pycache__' --exclude='.git' "$src/" "$dest/"
+
+  # ── 2. Marketplace: create directory source ──
+  mkdir -p "${mp_dir}/.claude-plugin"
+  mkdir -p "${mp_dir}/plugins/${plugin_name}"
+  rsync -a --delete --exclude='__pycache__' --exclude='.git' "$src/" "${mp_dir}/plugins/${plugin_name}/"
+
+  # Create marketplace.json if missing
+  if [ ! -f "${mp_dir}/.claude-plugin/marketplace.json" ]; then
+    local desc
+    desc=$(jq -r '.description // "LLM plugin"' "${src}/.claude-plugin/plugin.json")
+    cat > "${mp_dir}/.claude-plugin/marketplace.json" << MPEOF
+{
+  "name": "${marketplace}",
+  "owner": {"name": "Mark"},
+  "metadata": {"description": "${desc}", "version": "${version}"},
+  "plugins": [
+    {
+      "name": "${plugin_name}",
+      "description": "${desc}",
+      "version": "${version}",
+      "author": {"name": "Mark"},
+      "source": "./plugins/${plugin_name}"
+    }
+  ]
+}
+MPEOF
+    info "${slug}: created marketplace manifest"
   fi
 
-  # Update installed_plugins.json
-  if [ ! -f "$INSTALLED_FILE" ]; then
-    info "Creating ${INSTALLED_FILE}"
-    echo '{"version":2,"plugins":{}}' > "$INSTALLED_FILE"
-  fi
-
-  # Check if jq is available
-  if ! command -v jq &>/dev/null; then
-    warn "jq not found — skipping registry update for ${name}."
-    warn "Manually add ${key} to ${INSTALLED_FILE}"
-    return
-  fi
-
-  # Upsert the plugin entry
+  # ── 3. installed_plugins.json ──
+  ensure_json_file "$INSTALLED_FILE" '{"version":2,"plugins":{}}'
   local entry
   entry=$(jq -n \
     --arg scope "user" \
@@ -93,73 +155,101 @@ install_plugin() {
     --arg now "$NOW" \
     '[{"scope":$scope,"installPath":$path,"version":$ver,"installedAt":$now,"lastUpdated":$now}]'
   )
-
   local updated
   updated=$(jq --arg key "$key" --argjson entry "$entry" \
     '.plugins[$key] = $entry' "$INSTALLED_FILE")
   echo "$updated" > "$INSTALLED_FILE"
+  info "${slug}: registered in installed_plugins.json"
 
-  info "${name}: registered in installed_plugins.json"
+  # ── 4. known_marketplaces.json ──
+  ensure_json_file "$KNOWN_MP_FILE" '{}'
+  updated=$(jq --arg mp "$marketplace" --arg path "$mp_dir" --arg now "$NOW" \
+    '.[$mp] = {"source":{"source":"directory","path":$path},"installLocation":$path,"lastUpdated":$now}' \
+    "$KNOWN_MP_FILE")
+  echo "$updated" > "$KNOWN_MP_FILE"
+  info "${slug}: registered in known_marketplaces.json"
+
+  # ── 5. settings.json: enable plugin + register marketplace ──
+  ensure_json_file "$SETTINGS_FILE" '{}'
+
+  # Enable plugin
+  updated=$(jq --arg key "$key" \
+    '.enabledPlugins[$key] = true' "$SETTINGS_FILE")
+  echo "$updated" > "$SETTINGS_FILE"
+
+  # Register marketplace in extraKnownMarketplaces
+  updated=$(jq --arg mp "$marketplace" --arg path "$mp_dir" \
+    '.extraKnownMarketplaces[$mp] = {"source":{"source":"directory","path":$path}}' \
+    "$SETTINGS_FILE")
+  echo "$updated" > "$SETTINGS_FILE"
+  info "${slug}: enabled in settings.json"
+
+  # ── 6. Remove any .orphaned_at markers ──
+  find "$dest" -name ".orphaned_at" -delete 2>/dev/null || true
 }
 
-uninstall_plugin() {
-  local name="$1" dest="$2" key="$3"
+# ─── Uninstall function ──────────────────────────────────────────────
 
+uninstall_plugin() {
+  local slug="$1"
+  local marketplace="${PLUGIN_MP[$slug]}"
+  local plugin_name="${PLUGIN_NAME[$slug]}"
+  local version="${PLUGIN_VER[$slug]}"
+  local key="${plugin_name}@${marketplace}"
+  local dest="${CACHE_DIR}/${marketplace}/${plugin_name}/${version}"
+  local mp_dir="${MARKETPLACE_DIR}/${marketplace}"
+
+  # Remove cache
   if [ -d "$dest" ]; then
     rm -rf "$dest"
-    info "${name}: removed ${dest}"
+    info "${slug}: removed cache"
   fi
 
-  if command -v jq &>/dev/null && [ -f "$INSTALLED_FILE" ]; then
+  # Remove marketplace
+  if [ -d "$mp_dir" ]; then
+    rm -rf "$mp_dir"
+    info "${slug}: removed marketplace"
+  fi
+
+  # Remove from installed_plugins.json
+  if [ -f "$INSTALLED_FILE" ] && command -v jq &>/dev/null; then
     local updated
     updated=$(jq --arg key "$key" 'del(.plugins[$key])' "$INSTALLED_FILE")
     echo "$updated" > "$INSTALLED_FILE"
-    info "${name}: removed from installed_plugins.json"
   fi
+
+  # Remove from known_marketplaces.json
+  if [ -f "$KNOWN_MP_FILE" ] && command -v jq &>/dev/null; then
+    local updated
+    updated=$(jq --arg mp "$marketplace" 'del(.[$mp])' "$KNOWN_MP_FILE")
+    echo "$updated" > "$KNOWN_MP_FILE"
+  fi
+
+  # Remove from settings.json
+  if [ -f "$SETTINGS_FILE" ] && command -v jq &>/dev/null; then
+    local updated
+    updated=$(jq --arg key "$key" --arg mp "$marketplace" \
+      'del(.enabledPlugins[$key]) | del(.extraKnownMarketplaces[$mp])' "$SETTINGS_FILE")
+    echo "$updated" > "$SETTINGS_FILE"
+  fi
+
+  info "${slug}: uninstalled"
 }
 
-# ─── Main ────────────────────────────────────────────────────────────
+# ─── Pi coding agent ─────────────────────────────────────────────────
 
-echo ""
-echo "Claude Code LLM Plugins Installer"
-echo "──────────────────────────────────"
+install_pi() {
+  if command -v pi &>/dev/null; then
+    info "Pi coding agent already installed ($(pi --version 2>/dev/null || echo 'unknown'))"
+  else
+    info "Installing Pi coding agent globally..."
+    npm install -g @mariozechner/pi-coding-agent
+  fi
 
-# Ensure base dirs exist
-mkdir -p "$PLUGINS_DIR" "$CACHE_DIR"
-
-TARGET="${1:-all}"
-
-case "$TARGET" in
-  codex)
-    install_plugin "Codex" "$CODEX_SRC" "$CODEX_DEST" "$CODEX_KEY" "local"
-    ;;
-  gemini)
-    install_plugin "Gemini" "$GEMINI_SRC" "$GEMINI_DEST" "$GEMINI_KEY" "local"
-    ;;
-  grok)
-    install_plugin "Grok" "$GROK_SRC" "$GROK_DEST" "$GROK_KEY" "local"
-    ;;
-  glm)
-    install_plugin "GLM" "$GLM_SRC" "$GLM_DEST" "$GLM_KEY" "local"
-    ;;
-  minimax)
-    install_plugin "MiniMax" "$MINIMAX_SRC" "$MINIMAX_DEST" "$MINIMAX_KEY" "local"
-    ;;
-  banana)
-    install_plugin "Nano Banana" "$BANANA_SRC" "$BANANA_DEST" "$BANANA_KEY" "local"
-    ;;
-  pi)
-    if command -v pi &>/dev/null; then
-      info "Pi coding agent already installed ($(pi --version 2>/dev/null || echo 'unknown version'))"
-    else
-      info "Installing Pi coding agent globally..."
-      npm install -g @mariozechner/pi-coding-agent
-    fi
-    # Set up models.json if not present
-    if [ ! -f "${HOME}/.pi/agent/models.json" ]; then
-      mkdir -p "${HOME}/.pi/agent"
-      info "Creating ~/.pi/agent/models.json with GLM, MiniMax, and Grok providers"
-      cat > "${HOME}/.pi/agent/models.json" << 'PIEOF'
+  if [ ! -f "${HOME}/.pi/agent/models.json" ]; then
+    mkdir -p "${HOME}/.pi/agent"
+    info "Creating ~/.pi/agent/models.json with GLM, MiniMax, and Grok providers"
+    cat > "${HOME}/.pi/agent/models.json" << 'PIEOF'
 {
   "providers": {
     "minimax": {
@@ -177,7 +267,8 @@ case "$TARGET" in
       "api": "openai-completions",
       "models": [
         { "id": "glm-5-turbo", "contextWindow": 131072 },
-        { "id": "glm-5", "contextWindow": 131072 }
+        { "id": "glm-5", "contextWindow": 131072 },
+        { "id": "glm-4.5-flash", "contextWindow": 131072 }
       ]
     },
     "grok": {
@@ -185,38 +276,49 @@ case "$TARGET" in
       "apiKey": "XAI_API_KEY",
       "api": "openai-completions",
       "models": [
-        { "id": "grok-4-1-fast-non-reasoning", "contextWindow": 2000000 }
+        { "id": "grok-4-1-fast-non-reasoning", "contextWindow": 2000000 },
+        { "id": "grok-4.20-0309-non-reasoning", "contextWindow": 2000000 }
       ]
     }
   }
 }
 PIEOF
-    else
-      info "Pi models.json already exists at ~/.pi/agent/models.json"
-    fi
+  else
+    info "Pi models.json already exists at ~/.pi/agent/models.json"
+  fi
+}
+
+# ─── Main ────────────────────────────────────────────────────────────
+
+echo ""
+echo "Claude Code LLM Plugins Installer"
+echo "──────────────────────────────────"
+
+# Ensure base dirs exist
+mkdir -p "$PLUGINS_DIR" "$CACHE_DIR" "$MARKETPLACE_DIR"
+
+# jq is required for all registration
+check_jq
+
+TARGET="${1:-all}"
+
+case "$TARGET" in
+  codex|gemini|grok|glm|minimax|banana)
+    install_plugin "$TARGET"
+    ;;
+  pi)
+    install_pi
     ;;
   all)
-    install_plugin "Codex" "$CODEX_SRC" "$CODEX_DEST" "$CODEX_KEY" "local"
-    install_plugin "Gemini" "$GEMINI_SRC" "$GEMINI_DEST" "$GEMINI_KEY" "local"
-    install_plugin "Grok" "$GROK_SRC" "$GROK_DEST" "$GROK_KEY" "local"
-    install_plugin "GLM" "$GLM_SRC" "$GLM_DEST" "$GLM_KEY" "local"
-    install_plugin "MiniMax" "$MINIMAX_SRC" "$MINIMAX_DEST" "$MINIMAX_KEY" "local"
-    install_plugin "Nano Banana" "$BANANA_SRC" "$BANANA_DEST" "$BANANA_KEY" "local"
-    # Auto-install Pi if GLM or MiniMax are installed (they need it for /code commands)
-    if command -v pi &>/dev/null; then
-      info "Pi coding agent already installed"
-    else
-      info "Installing Pi coding agent (needed for /glm:code and /minimax:code)..."
-      npm install -g @mariozechner/pi-coding-agent
-    fi
+    for p in "${ALL_PLUGINS[@]}"; do
+      install_plugin "$p"
+    done
+    install_pi
     ;;
   uninstall)
-    uninstall_plugin "Codex" "$CODEX_DEST" "$CODEX_KEY"
-    uninstall_plugin "Gemini" "$GEMINI_DEST" "$GEMINI_KEY"
-    uninstall_plugin "Grok" "$GROK_DEST" "$GROK_KEY"
-    uninstall_plugin "GLM" "$GLM_DEST" "$GLM_KEY"
-    uninstall_plugin "MiniMax" "$MINIMAX_DEST" "$MINIMAX_KEY"
-    uninstall_plugin "Nano Banana" "$BANANA_DEST" "$BANANA_KEY"
+    for p in "${ALL_PLUGINS[@]}"; do
+      uninstall_plugin "$p"
+    done
     ;;
   *)
     echo "Usage: $0 [codex|gemini|grok|glm|minimax|banana|pi|all|uninstall]"
@@ -226,4 +328,5 @@ esac
 
 echo ""
 echo "Done. Restart Claude Code to load the plugins."
+echo "  Tip: run /reload-plugins inside Claude Code"
 echo ""
