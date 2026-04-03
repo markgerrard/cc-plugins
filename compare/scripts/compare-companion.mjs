@@ -16,6 +16,8 @@ import { parseModelList, listModels, getModel, DEFAULT_MODELS } from "./lib/mode
 
 // ─── Arg parsing ────────────────────────────────────────────────────
 
+const BOOLEAN_FLAGS = new Set(["full", "background", "stream"]);
+
 function parseArgs(rawArgs) {
   const flags = {};
   const positional = [];
@@ -23,7 +25,10 @@ function parseArgs(rawArgs) {
   while (i < rawArgs.length) {
     if (rawArgs[i].startsWith("--")) {
       const key = rawArgs[i].slice(2);
-      if (i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith("--")) {
+      if (BOOLEAN_FLAGS.has(key)) {
+        flags[key] = true;
+        i++;
+      } else if (i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith("--")) {
         flags[key] = rawArgs[i + 1];
         i += 2;
       } else {
