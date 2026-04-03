@@ -29,6 +29,7 @@ const MODEL_REGISTRY = {
   grok: {
     name: "Grok",
     command: "ask",
+    fullCommand: "code",
     companion: "grok-companion.mjs",
     marketplace: "xai-grok",
     plugin: "grok",

@@ -63,6 +63,7 @@ import {
 } from "./lib/render.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
+import { createPiClient } from "./lib/pi-rpc.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 
@@ -427,6 +428,60 @@ async function cmdTaskWorker(flags, positional) {
   }
 }
 
+// ─── code (pi agent) ────────────────────────────────────────────────
+
+async function cmdCode(flags, positional) {
+  const task = positional.join(" ");
+  if (!task) {
+    console.error("Error: No task provided.\nUsage: /grok:code <task>");
+    process.exit(1);
+  }
+
+  const model = normalizeRequestedModel(flags.model);
+  console.error(`[grok:code] Starting Pi with Grok (${model})...`);
+
+  const workDir = resolveWorkspaceRoot(process.cwd());
+  console.error(`[grok:code] Working directory: ${workDir}`);
+
+  const pi = createPiClient({
+    provider: "grok",
+    model: model,
+    cwd: workDir,
+  });
+
+  try {
+    await pi.start();
+    console.error("[grok:code] Pi started. Sending task...");
+
+    const events = await pi.promptAndWait(task, 300_000);
+
+    const textParts = [];
+    for (const event of events) {
+      if (event.type === "text_delta") {
+        textParts.push(event.text || event.delta || "");
+      }
+      if (event.type === "tool_start") {
+        console.error(`[grok:code] Tool: ${event.tool} ${event.args ? JSON.stringify(event.args).slice(0, 80) : ""}`);
+      }
+    }
+
+    let finalText;
+    try {
+      finalText = await pi.getLastAssistantText();
+    } catch {
+      finalText = textParts.join("") || "(No output captured)";
+    }
+
+    console.log(finalText);
+  } catch (err) {
+    console.error(`[grok:code] Error: ${err.message}`);
+    if (pi.getStderr()) console.error(`[grok:code] stderr: ${pi.getStderr().slice(0, 500)}`);
+    process.exit(1);
+  } finally {
+    await pi.stop();
+  }
+}
+
 // ─── main ───────────────────────────────────────────────────────────
 
 async function main() {
@@ -442,6 +497,7 @@ async function main() {
     case "pulse":      await runCommand("pulse", flags, positional, buildPulsePrompt); break;
     case "compare":    await runCommand("compare", flags, positional, buildComparePrompt); break;
     case "ask":        await runCommand("ask", flags, positional, buildAskPrompt); break;
+    case "code":       await cmdCode(flags, positional); break;
     case "status":     await cmdStatus(flags, positional); break;
     case "result":     await cmdResult(flags, positional); break;
     case "cancel":     await cmdCancel(flags, positional); break;
