@@ -162,56 +162,76 @@ async function cmdReview(flags, positional) {
   const focus = positional.join(" ") || "general code review";
   const base = flags.base || "HEAD";
   const scope = flags.scope || "auto";
-
-  // Get git diff
-  const diffArgs = ["diff"];
-  if (scope === "branch") {
-    diffArgs.push(`${base}...HEAD`);
-  } else if (scope === "working-tree") {
-    // unstaged only
-  } else {
-    diffArgs.push(base);
-  }
-
-  const diffResult = spawnSync("git", diffArgs, {
-    encoding: "utf8",
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: 30_000,
-  });
-
-  const diff = diffResult.stdout?.trim();
-  if (!diff) {
-    console.log("No changes found to review.");
-    process.exit(0);
-  }
-
+  const full = flags.full === true;
   const models = parseModelList(flags.models);
-  const prompt =
-    `You are an expert code reviewer. Review the following git diff.\n\n` +
-    `Focus: ${focus}\n\n` +
-    `Provide:\n` +
-    `1. **Critical issues** — bugs, security problems, data loss risks\n` +
-    `2. **Important suggestions** — performance, maintainability, best practices\n` +
-    `3. **Minor notes** — style, naming, documentation\n\n` +
-    `Be specific: reference file names and line numbers.\n\n` +
-    `--- GIT DIFF ---\n${diff}`;
 
-  console.error(`[review] Sending diff (${diff.split("\n").length} lines) to ${models.length} models: ${models.join(", ")}...`);
+  let prompt;
+  let mode;
 
-  const results = await fanOut(models, prompt);
-  console.log(renderReview(results, focus, diff));
+  if (full) {
+    // Full repo mode — let each CLI traverse the repo itself
+    prompt =
+      `You are an expert code reviewer. Review this entire repository.\n\n` +
+      `Focus: ${focus}\n\n` +
+      `Provide:\n` +
+      `1. **Architecture** — overall structure, patterns, anti-patterns\n` +
+      `2. **Critical issues** — bugs, security problems, data loss risks\n` +
+      `3. **Important suggestions** — performance, maintainability, best practices\n` +
+      `4. **Technical debt** — areas that need refactoring or attention\n` +
+      `5. **Strengths** — what's done well\n\n` +
+      `Be specific: reference file names and line numbers.`;
+    mode = "full repo";
+    console.error(`[review] Full repo review via ${models.length} models: ${models.join(", ")}...`);
+  } else {
+    // Diff mode — pipe the git diff into the prompt
+    const diffArgs = ["diff"];
+    if (scope === "branch") {
+      diffArgs.push(`${base}...HEAD`);
+    } else if (scope === "working-tree") {
+      // unstaged only
+    } else {
+      diffArgs.push(base);
+    }
+
+    const diffResult = spawnSync("git", diffArgs, {
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    });
+
+    const diff = diffResult.stdout?.trim();
+    if (!diff) {
+      console.log("No changes found to review. Use --full for a full repo review.");
+      process.exit(0);
+    }
+
+    prompt =
+      `You are an expert code reviewer. Review the following git diff.\n\n` +
+      `Focus: ${focus}\n\n` +
+      `Provide:\n` +
+      `1. **Critical issues** — bugs, security problems, data loss risks\n` +
+      `2. **Important suggestions** — performance, maintainability, best practices\n` +
+      `3. **Minor notes** — style, naming, documentation\n\n` +
+      `Be specific: reference file names and line numbers.\n\n` +
+      `--- GIT DIFF ---\n${diff}`;
+    mode = `diff (${diffResult.stdout.trim().split("\n").length} lines)`;
+    console.error(`[review] Sending ${mode} to ${models.length} models: ${models.join(", ")}...`);
+  }
+
+  const timeout = full ? 600_000 : 300_000; // 10 min for full, 5 min for diff
+  const results = await fanOut(models, prompt, timeout);
+  console.log(renderReview(results, focus, mode));
 }
 
-function renderReview(results, focus, diff) {
+function renderReview(results, focus, mode) {
   const successful = results.filter((r) => !r.error);
   const failed = results.filter((r) => r.error);
-  const diffLines = diff.split("\n").length;
 
   const lines = [
     `## Multi-Model Code Review`,
     "",
     `**Focus:** ${focus}`,
-    `**Diff:** ${diffLines} lines`,
+    `**Scope:** ${mode}`,
     `**Models:** ${results.map((r) => r.model).join(", ")}`,
     `**Responses:** ${successful.length}/${results.length}`,
     "",
