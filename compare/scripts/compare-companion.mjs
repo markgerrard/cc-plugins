@@ -156,10 +156,11 @@ async function cmdCompare(flags, positional) {
     process.exit(1);
   }
 
+  const full = flags.full === true;
   const models = parseModelList(flags.models);
-  console.error(`[compare] Querying ${models.length} models in parallel: ${models.join(", ")}...`);
+  console.error(`[compare] Querying ${models.length} models in parallel: ${models.join(", ")}${full ? " (full file access)" : ""}...`);
 
-  const results = await fanOut(models, prompt);
+  const results = await fanOut(models, prompt, 300_000, { full });
   const output = renderCompare(results, prompt);
   const saved = saveResults(output, "compare");
   console.log(output);
@@ -173,10 +174,11 @@ async function cmdConsensus(flags, positional) {
     process.exit(1);
   }
 
+  const full = flags.full === true;
   const models = parseModelList(flags.models);
-  console.error(`[consensus] Querying ${models.length} models in parallel: ${models.join(", ")}...`);
+  console.error(`[consensus] Querying ${models.length} models in parallel: ${models.join(", ")}${full ? " (full file access)" : ""}...`);
 
-  const results = await fanOut(models, prompt);
+  const results = await fanOut(models, prompt, 300_000, { full });
   const output = renderConsensus(results, prompt);
   const saved = saveResults(output, "consensus");
   console.log(output);
