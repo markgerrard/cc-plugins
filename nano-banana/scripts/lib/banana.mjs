@@ -10,13 +10,15 @@ import { fileURLToPath } from "node:url";
 
 const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes
-const DEFAULT_IMAGE_MODEL = "gemini-2.0-flash-exp";
-const DEFAULT_TEXT_MODEL = "gemini-2.0-flash-exp";
+const DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image";
+const DEFAULT_TEXT_MODEL = "gemini-2.5-flash";
 
 const MODEL_ALIASES = new Map([
-  ["pro", "gemini-2.5-pro-preview-06-05"],
-  ["flash", "gemini-2.0-flash-exp"],
-  ["flash-image", "gemini-2.0-flash-exp"],
+  ["flash", "gemini-2.5-flash-image"],
+  ["flash-image", "gemini-2.5-flash-image"],
+  ["3flash", "gemini-3.1-flash-image-preview"],
+  ["3pro", "gemini-3-pro-image-preview"],
+  ["pro", "gemini-3-pro-image-preview"],
 ]);
 
 /**
