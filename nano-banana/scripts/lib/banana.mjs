@@ -202,42 +202,70 @@ export async function generateImage(prompt, options = {}) {
 }
 
 /**
- * Edit an existing image based on a text prompt.
+ * Edit an existing image (or compose from multiple reference images) based
+ * on a text prompt.
  *
- * @param {string} imagePath - Path to the source image
- * @param {string} prompt - Edit instructions
+ * @param {string|string[]} imagePaths - One reference image path, or an
+ *   array of reference image paths. When multiple are provided, all are
+ *   sent to Gemini as inline_data parts in the same request — the model
+ *   treats them jointly as style/content references for the generation.
+ * @param {string} prompt - Edit or composition instructions
  * @param {object} options
  * @returns {Promise<{text: string, imagePath: string|null, exitCode: number}>}
  */
-export async function editImage(imagePath, prompt, options = {}) {
+export async function editImage(imagePaths, prompt, options = {}) {
   const {
     model,
+    aspect,
+    size,
     timeout = DEFAULT_TIMEOUT_MS,
     outputDir = process.cwd(),
   } = options;
 
+  const paths = Array.isArray(imagePaths) ? imagePaths : [imagePaths];
+  if (paths.length === 0) {
+    return {
+      text: "No reference image provided.",
+      imagePath: null,
+      exitCode: 1,
+    };
+  }
+
   const resolvedModel = normalizeModel(model, true);
   const apiKey = getApiKey();
-  const imageData = readImageAsBase64(imagePath);
+
+  // Build one inline_data part per reference image, followed by the text
+  // prompt. Gemini accepts arbitrary numbers of image parts in a single
+  // contents[] entry and uses them all as joint visual context.
+  const imageParts = paths.map((p) => {
+    const imageData = readImageAsBase64(p);
+    return {
+      inline_data: {
+        mime_type: imageData.mimeType,
+        data: imageData.data,
+      },
+    };
+  });
 
   const body = {
     contents: [
       {
-        parts: [
-          {
-            inline_data: {
-              mime_type: imageData.mimeType,
-              data: imageData.data,
-            },
-          },
-          { text: prompt },
-        ],
+        parts: [...imageParts, { text: prompt }],
       },
     ],
     generationConfig: {
       responseModalities: ["TEXT", "IMAGE"],
     },
   };
+
+  // Add image config if aspect ratio or size specified — required because
+  // multi-reference edits otherwise default to the dominant reference's
+  // aspect, which can be wildly off for square-video pipelines.
+  if (aspect || size) {
+    body.generationConfig.imageConfig = {};
+    if (aspect) body.generationConfig.imageConfig.aspectRatio = aspect;
+    if (size) body.generationConfig.imageConfig.imageSize = size;
+  }
 
   try {
     const url = `${API_BASE}/models/${resolvedModel}:generateContent?key=${encodeURIComponent(apiKey)}`;

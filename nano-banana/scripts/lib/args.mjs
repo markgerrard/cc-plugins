@@ -40,7 +40,11 @@ export function splitRawArgumentString(raw) {
 
 /**
  * Parse tokens into { flags, positional }.
- * Known flags:  --background, --model <val>, --file <val>, --json, --all, --aspect <val>, --size <val>
+ * Known flags:  --background, --model <val>, --file <val> (repeatable), --json, --all, --aspect <val>, --size <val>
+ *
+ * --file can be repeated to pass multiple reference images in a single
+ * generation call. When repeated, flags.file is an array; when given
+ * once, it remains a string for backward compatibility.
  */
 export function parseArgs(argv) {
   const flags = {};
@@ -60,8 +64,21 @@ export function parseArgs(argv) {
         i++;
         continue;
       }
-      // Value flags
-      if (["model", "file", "kind", "aspect", "size"].includes(key) && i + 1 < argv.length) {
+      // Repeatable file flag — accumulates into an array
+      if (key === "file" && i + 1 < argv.length) {
+        const value = argv[++i];
+        if (flags.file === undefined) {
+          flags.file = value;
+        } else if (Array.isArray(flags.file)) {
+          flags.file.push(value);
+        } else {
+          flags.file = [flags.file, value];
+        }
+        i++;
+        continue;
+      }
+      // Single-value flags
+      if (["model", "kind", "aspect", "size"].includes(key) && i + 1 < argv.length) {
         flags[key] = argv[++i];
         i++;
         continue;

@@ -239,10 +239,14 @@ async function cmdGenerate(flags, positional) {
 async function cmdEdit(flags, positional) {
   const prompt = positional.join(" ");
   if (!prompt) {
-    throw new Error("No edit prompt provided.\nUsage: /banana:edit --file <image> <prompt>");
+    throw new Error("No edit prompt provided.\nUsage: /banana:edit --file <image> [--file <image>...] <prompt>");
   }
-  if (!flags.file) {
-    throw new Error("No image file specified.\nUsage: /banana:edit --file <image> <prompt>");
+  // flags.file is a string when --file was given once, an array when
+  // repeated. Both are valid; editImage accepts either.
+  const files = flags.file;
+  const fileCount = Array.isArray(files) ? files.length : files ? 1 : 0;
+  if (fileCount === 0) {
+    throw new Error("No image file specified.\nUsage: /banana:edit --file <image> [--file <image>...] <prompt>");
   }
 
   const isBackground = flags.background === true;
@@ -252,7 +256,7 @@ async function cmdEdit(flags, positional) {
     const info = launchBackgroundWorker(jobId, "edit", prompt, {
       model: flags.model,
       title: prompt,
-      file: flags.file,
+      file: files,
     });
 
     const lines = [
@@ -270,9 +274,12 @@ async function cmdEdit(flags, positional) {
   }
 
   // Foreground
-  console.error(`[banana] Editing image: ${flags.file}`);
-  const result = await editImage(flags.file, prompt, {
+  const label = Array.isArray(files) ? `${files.length} reference images` : files;
+  console.error(`[banana] Editing with ${label}`);
+  const result = await editImage(files, prompt, {
     model: flags.model,
+    aspect: flags.aspect,
+    size: flags.size,
   });
 
   if (result.exitCode !== 0) {
@@ -291,6 +298,12 @@ async function cmdVariations(flags, positional) {
   if (!flags.file) {
     throw new Error("No image file specified.\nUsage: /banana:variations --file <image>");
   }
+  // Variations is conceptually single-source; if the caller passed
+  // multiple --file, take the first and warn.
+  const sourceFile = Array.isArray(flags.file) ? flags.file[0] : flags.file;
+  if (Array.isArray(flags.file) && flags.file.length > 1) {
+    console.error(`[banana] variations takes one source image; using ${sourceFile} and ignoring the rest`);
+  }
 
   const isBackground = flags.background === true;
 
@@ -298,8 +311,8 @@ async function cmdVariations(flags, positional) {
     const jobId = generateJobId("ban");
     const info = launchBackgroundWorker(jobId, "variations", "Generate variations", {
       model: flags.model,
-      title: `variations of ${path.basename(flags.file)}`,
-      file: flags.file,
+      title: `variations of ${path.basename(sourceFile)}`,
+      file: sourceFile,
     });
 
     const lines = [
@@ -317,8 +330,8 @@ async function cmdVariations(flags, positional) {
   }
 
   // Foreground
-  console.error(`[banana] Generating variations of: ${flags.file}`);
-  const result = await generateVariations(flags.file, {
+  console.error(`[banana] Generating variations of: ${sourceFile}`);
+  const result = await generateVariations(sourceFile, {
     model: flags.model,
   });
 
