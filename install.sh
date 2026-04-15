@@ -201,6 +201,27 @@ MPEOF
 
   # ── 6. Remove any .orphaned_at markers ──
   find "$dest" -name ".orphaned_at" -delete 2>/dev/null || true
+
+  # ── 7. Python deps (if the plugin ships a requirements.txt) ──
+  # Some plugins (gemini ACP bridge, etc.) depend on Python packages
+  # that aren't vendored into the repo. Install them on behalf of the user
+  # so the ACP handshake doesn't fail with a ModuleNotFoundError on first run.
+  local reqs
+  for reqs in "${src}/requirements.txt" "${src}/scripts/requirements.txt" "${src}/scripts/py/requirements.txt"; do
+    if [ -f "$reqs" ]; then
+      info "${slug}: installing Python deps from $(basename "$(dirname "$reqs")")/requirements.txt"
+      if command -v python3 >/dev/null 2>&1; then
+        # Prefer --user; --break-system-packages is required on Debian/Ubuntu
+        # where the system Python marks dist-packages as externally-managed.
+        python3 -m pip install --user --break-system-packages -q -r "$reqs" 2>&1 \
+          | grep -vE '^\s*$' \
+          || warn "${slug}: pip install reported non-zero; check output above"
+      else
+        warn "${slug}: python3 not on PATH — skipped Python deps. Install manually: python3 -m pip install -r $reqs"
+      fi
+      break
+    fi
+  done
 }
 
 # ─── Uninstall function ──────────────────────────────────────────────

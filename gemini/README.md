@@ -9,10 +9,17 @@ A Claude Code plugin that brings Gemini into your workflow as a second model for
 - [Claude Code](https://claude.ai/claude-code) installed
 - [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed and authenticated
 - Node.js 18+
+- Python 3.10+ with `pip` (ACP bridge dependency)
 
 ```bash
 npm install -g @google/gemini-cli
 gemini  # triggers browser OAuth on first run
+```
+
+The plugin talks to Gemini over the [Agent Client Protocol](https://pypi.org/project/agent-client-protocol/). `./install.sh gemini` installs that PyPI package for you; manual installs need:
+
+```bash
+python3 -m pip install --user --break-system-packages -r scripts/py/requirements.txt
 ```
 
 ## Installation
